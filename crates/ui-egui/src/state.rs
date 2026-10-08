@@ -67,6 +67,7 @@ pub enum Tool {
     EllipseMarquee,
     Lasso,
     PolygonLasso,
+    MagneticLasso,
     MagicWand,
     Crop,
     Eyedropper,
@@ -82,6 +83,7 @@ pub enum Tool {
     Gradient,
     PaintBucket,
     Type,
+    VerticalType,
     Hand,
     Zoom,
     SpotHealing,
@@ -111,12 +113,13 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 46] = [
+    pub const ALL: [Tool; 48] = [
         Tool::Move,
         Tool::RectMarquee,
         Tool::EllipseMarquee,
         Tool::Lasso,
         Tool::PolygonLasso,
+        Tool::MagneticLasso,
         Tool::MagicWand,
         Tool::Crop,
         Tool::Eyedropper,
@@ -132,6 +135,7 @@ impl Tool {
         Tool::Gradient,
         Tool::PaintBucket,
         Tool::Type,
+        Tool::VerticalType,
         Tool::Hand,
         Tool::Zoom,
         Tool::SpotHealing,
@@ -177,6 +181,7 @@ impl Tool {
             Tool::Count => "Count Tool",
             Tool::Lasso => "Lasso Tool",
             Tool::PolygonLasso => "Polygonal Lasso Tool",
+            Tool::MagneticLasso => "Magnetic Lasso Tool",
             Tool::MagicWand => "Magic Wand Tool",
             Tool::Crop => "Crop Tool",
             Tool::Slice => "Slice Tool",
@@ -184,6 +189,7 @@ impl Tool {
             Tool::Gradient => "Gradient Tool",
             Tool::PaintBucket => "Paint Bucket Tool",
             Tool::Type => "Horizontal Type Tool",
+            Tool::VerticalType => "Vertical Type Tool",
             Tool::Hand => "Hand Tool",
             Tool::Zoom => "Zoom Tool",
             Tool::SpotHealing => "Spot Healing Brush Tool",
@@ -210,6 +216,10 @@ impl Tool {
             Tool::CustomShape => "Custom Shape Tool",
         }
     }
+    pub fn is_type(self) -> bool {
+        matches!(self, Self::Type | Self::VerticalType)
+    }
+
     /// Retouching and painting tools that stroke with the brush (share the brush cursor and chip).
     pub fn is_brushlike(self) -> bool {
         matches!(
@@ -239,11 +249,11 @@ impl Tool {
             Tool::Brush | Tool::Pencil | Tool::MixerBrush => 'B',
             Tool::Eraser | Tool::BackgroundEraser | Tool::MagicEraser => 'E',
             Tool::Eyedropper | Tool::Ruler | Tool::Note | Tool::Count => 'I',
-            Tool::Lasso | Tool::PolygonLasso => 'L',
+            Tool::Lasso | Tool::PolygonLasso | Tool::MagneticLasso => 'L',
             Tool::MagicWand => 'W',
             Tool::Crop | Tool::Slice | Tool::SliceSelect => 'C',
             Tool::Gradient | Tool::PaintBucket => 'G',
-            Tool::Type => 'T',
+            Tool::Type | Tool::VerticalType => 'T',
             Tool::Hand => 'H',
             Tool::Zoom => 'Z',
             Tool::SpotHealing | Tool::Healing | Tool::Patch | Tool::ContentAwareMove => 'J',
@@ -267,11 +277,11 @@ impl Tool {
             Tool::MixerBrush => "🖌",
             Tool::Eraser => "⌫",
             Tool::Eyedropper => "💧",
-            Tool::Lasso | Tool::PolygonLasso => "L",
+            Tool::Lasso | Tool::PolygonLasso | Tool::MagneticLasso => "L",
             Tool::MagicWand => "W",
             Tool::Crop => "C",
             Tool::Gradient | Tool::PaintBucket => "G",
-            Tool::Type => "T",
+            Tool::Type | Tool::VerticalType => "T",
             Tool::Hand => "✋",
             Tool::Zoom => "🔍",
             _ => "•",
@@ -468,6 +478,12 @@ pub struct ToolOptions {
     /// Pencil › Auto Erase: a stroke that starts on the foreground colour paints the background colour.
     #[serde(default)]
     pub pencil_auto_erase: bool,
+    /// Magnetic Lasso: detection width (px, 1..256), edge contrast (%, 1..100), how often it
+    /// fastens points by itself (0..100), and whether pen pressure narrows the width.
+    pub magnetic_width: f32,
+    pub magnetic_contrast: f32,
+    pub magnetic_frequency: f32,
+    pub magnetic_pressure: bool,
 }
 
 fn yes() -> bool {
@@ -543,6 +559,10 @@ impl Default for ToolOptions {
             bg_protect_fg: false,
             zoom_scrubby: true,
             pencil_auto_erase: false,
+            magnetic_width: 10.0,
+            magnetic_contrast: 10.0,
+            magnetic_frequency: 57.0,
+            magnetic_pressure: false,
         }
     }
 }
@@ -596,13 +616,23 @@ pub struct TransformSession {
     /// the Quick Mask by itself (`None`: the layer, with its linked masks).
     #[serde(default)]
     pub target: Option<serde_json::Value>,
-    /// Free Transform on a copy (⌥⌘T): the copy was made for this session, so Cancel takes it back
-    /// and OK folds it into the transform's history step (#352).
+    /// The layer was made for this session (⌥⌘T's copy, #352; a file dropped on the canvas), so
+    /// Cancel takes it back and OK folds it into one history step with the transform.
     #[serde(default)]
-    pub copy: bool,
+    pub made: Option<MadeLayer>,
     /// Edit › Transform › Skew / Distort / Perspective (`Free` for Free Transform).
     #[serde(default)]
     pub mode: TransformMode,
+}
+
+/// Why a Free Transform session's layer was made for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MadeLayer {
+    /// Free Transform on a copy (⌥⌘T): OK makes the copy and the transform one Free Transform step.
+    Copy,
+    /// A file dropped on the canvas: OK makes the place and the transform one Place Embedded step.
+    Place,
 }
 
 /// In-progress inline type editing (Type tool). Offsets are character indices.
@@ -778,6 +808,9 @@ pub struct UiState {
     /// modifiers held at its first click.
     #[serde(default)]
     pub polygon_mode: String,
+    /// Magnetic Lasso border in progress (`magnetic_lasso_ui`).
+    #[serde(default)]
+    pub magnetic: crate::magnetic_lasso_ui::MagneticLasso,
     /// Crop tool rectangle being edited [x0, y0, x1, y1] (document coordinates).
     #[serde(default)]
     pub crop_rect: Option<[f64; 4]>,
@@ -848,6 +881,7 @@ impl Default for UiState {
             tool_options: ToolOptions::default(),
             polygon: Vec::new(),
             polygon_mode: String::new(),
+            magnetic: Default::default(),
             crop_rect: None,
             next_id: 1,
             status: String::new(),
